@@ -1,0 +1,17 @@
+{
+  "default_provider": "mock",
+  "yandex": {
+    "enabled": false,
+    "api_key": "",
+    "folder_id": ""
+  },
+  "ui": {
+    "language": "ru_RU",
+    "theme": "light",
+    "font_size": 12
+  },
+  "features": {
+    "auto_backup": true,
+    "check_updates": true
+  }
+}
