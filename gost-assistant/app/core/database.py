@@ -80,9 +80,6 @@ class GOSTDatabase:
                        )
                        """)
 
-        # Старый кеш больше не используется, поэтому удаляется при инициализации.
-        cursor.execute("DROP TABLE IF EXISTS cache")
-
         # При первом запуске можно перенести Yandex-ключи из .env в БД.
         # В БД они попадают не открытым текстом, а через protect_secret().
         load_app_env()
