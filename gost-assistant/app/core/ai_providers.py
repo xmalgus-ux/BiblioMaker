@@ -1,21 +1,28 @@
 """
-Модуль для работы с ИИ-провайдерами
+Модуль для работы с ИИ-агентами
 Реализует абстракцию для различных API (YandexGPT, Mock)
 """
 
 import os
+import base64
+import shutil
 import requests
 import re
 import traceback
-from dotenv import load_dotenv
+import uuid
 from abc import ABC, abstractmethod
 from typing import List, Dict
 from datetime import datetime
 import json
+from pathlib import Path
+import certifi
+import urllib3
 from .source_classifier import classify_entry
+from .secrets import unprotect_secret
+from .env_loader import load_app_env
 
 # Загрузка переменных окружения из .env
-load_dotenv()
+load_app_env()
 
 
 # ==================== АБСТРАКТНЫЙ БАЗОВЫЙ КЛАСС ====================
@@ -49,14 +56,14 @@ class YandexGPTProvider(AIProvider):
     """Провайдер: YandexGPT (использует API-ключ напрямую)"""
 
     def __init__(self, api_key: str = None, folder_id: str = None):
-        # Берём из .env если не переданы
+        # Берём из настроек приложения, затем из .env если не переданы
         self.api_key = api_key or os.getenv('YANDEX_API_KEY')
         self.folder_id = folder_id or os.getenv('YANDEX_FOLDER_ID')
 
         if not self.api_key or not self.folder_id:
             raise ValueError(
                 "YANDEX_API_KEY и YANDEX_FOLDER_ID не найдены!\n"
-                "Проверь файл .env в корне проекта"
+                "Укажи их в настройках ИИ-агента или проверь файл .env в корне проекта"
             )
 
         # URL для YandexGPT
@@ -119,7 +126,7 @@ class YandexGPTProvider(AIProvider):
 
             return {
                 'success': True,
-                'fixed_lines': self._parse_response(fixed_text),
+                'fixed_lines': self._parse_response(fixed_text, text_lines),
                 'raw_response': fixed_text,
                 'provider': self.get_name(),
                 'timestamp': datetime.now().isoformat()
@@ -150,6 +157,17 @@ class YandexGPTProvider(AIProvider):
             "zh_CN": "中文",
         }
         comment_language = comment_languages.get(ui_language, "русском языке")
+
+        result_header = {
+            "ru_RU": "ИСПРАВЛЕННЫЙ СПИСОК",
+            "en_US": "FIXED LIST",
+            "zh_CN": "修正列表",
+        }.get(ui_language, "ИСПРАВЛЕННЫЙ СПИСОК")
+        missing_header = {
+            "ru_RU": "НЕ ХВАТАЕТ ДАННЫХ",
+            "en_US": "MISSING DATA",
+            "zh_CN": "缺少数据",
+        }.get(ui_language, "НЕ ХВАТАЕТ ДАННЫХ")
 
         return f"""
 ТВОЯ ЗАДАЧА: Исправить список литературы согласно правилам ниже.
@@ -202,35 +220,166 @@ class YandexGPTProvider(AIProvider):
 - Не изменяй содержание (названия, имена авторов, годы, страницы).
 - Для интернет-источников добавь [Электронный ресурс] и дату обращения.
 - Для статей добавь разделитель «//» перед названием журнала/сборника.
-- Для книг с 1–3 авторами повтори авторов после названия через /.
 - Для книг с 4+ авторами НЕ указывай авторов в начале, только после /.
-- Верни исправленный список: каждая запись с новой строки, без нумерации.
 - Каждая строка имеет префикс TYPE=... Используй его как подсказку типа источника.
 - Если TYPE=unknown, определи тип по содержимому.
 - Если данных не хватает (автор, город, издательство, год, страницы, URL, дата обращения и т. п.), НЕ придумывай.
 - Не переводи сами библиографические записи: язык, названия и данные источников должны остаться на языке пользовательского ввода.
 - Комментарии, пояснения и блок с недостающими данными пиши на языке интерфейса: {comment_language}.
-- После списка добавь блок с недостающими данными и перечисли по строкам, чего не хватает.
+- Никогда не показывай пользователю служебные префиксы TYPE=... в итоговом ответе.
+- Верни ответ строго в двух блоках:
+  {result_header}:
+  1. исправленная запись первой строки
+  2. исправленная запись второй строки
+  ...
+
+  {missing_header}:
+  1. недостающие данные для первой строки
+  2. недостающие данные для второй строки
+  ...
+- Номера в блоке {missing_header} должны соответствовать номерам строк в блоке {result_header}.
+- Если нет недостающих данных, не возвращай блок {missing_header}
 
 ИСХОДНЫЙ СПИСОК:
 {bibliography_text}
 
-ИСПРАВЛЕННЫЙ СПИСОК:
+{result_header}:
 """
 
-    def _parse_response(self, text: str) -> List[str]:
-        """Парсинг ответа модели в список записей"""
-        lines = []
-        for line in text.strip().split('\n'):
-            line = line.strip()
-            # Убираем нумерацию/маркеры перед TYPE
-            line = re.sub(r'^[\s\d\.\)\-•—–]+', '', line)
-            line = re.sub(r'^TYPE=[^:\s]+(?:\s*[:\-—–]\s*|\s+)', '', line)
-            # Убираем нумерацию и маркеры после удаления TYPE
-            line = re.sub(r'^[\s\d\.\)\-•—–]+', '', line)
-            if line and len(line) > 10:
-                lines.append(line)
-        return lines
+    def _parse_response(self, text: str, fallback_entries: List[str] = None) -> List[str]:
+        """Парсинг ответа модели в пользовательский нумерованный результат."""
+        fixed_header = "ИСПРАВЛЕННЫЙ СПИСОК:"
+        missing_header = "НЕ ХВАТАЕТ ДАННЫХ:"
+        fixed_lines = []
+        missing_lines = []
+        current_section = None
+
+        for raw_line in text.strip().split('\n'):
+            line = self._clean_model_line(raw_line)
+            if not line:
+                continue
+
+            if self._is_fixed_header(line):
+                current_section = "fixed"
+                continue
+            if self._is_missing_header(line):
+                current_section = "missing"
+                continue
+
+            if current_section == "missing":
+                missing_lines.append(line)
+            elif current_section == "fixed":
+                fixed_lines.append(line)
+            elif self._looks_like_missing_line(line):
+                missing_lines.append(line)
+            else:
+                fixed_lines.append(line)
+
+        if not fixed_lines and fallback_entries:
+            fixed_lines = [
+                f"{i}. {self._clean_source_entry(entry)}"
+                for i, entry in enumerate(fallback_entries, start=1)
+            ]
+
+        fixed_lines = self._renumber_lines(fixed_lines)
+        missing_lines = self._renumber_lines(self._filter_empty_missing_lines(missing_lines))
+
+        result = []
+        if fixed_lines:
+            result.append(fixed_header)
+            result.extend(fixed_lines)
+        if missing_lines:
+            if result:
+                result.append("")
+            result.append(missing_header)
+            result.extend(missing_lines)
+        return result
+
+    @staticmethod
+    def _clean_model_line(line: str) -> str:
+        """Удаление служебных TYPE-префиксов без потери нумерации ответа."""
+        line = line.strip()
+        if not line:
+            return ""
+
+        line = re.sub(
+            r'(^|[\s:;,\-—–])TYPE=[^:\s]+(?:\s*[:\-—–]\s*|\s+)?',
+            lambda match: match.group(1),
+            line
+        )
+        line = re.sub(r'\s{2,}', ' ', line).strip()
+        line = re.sub(r'^(\d+[\.\)])\s*', r'\1 ', line)
+
+        if re.fullmatch(r'TYPE=[^:\s]+', line, flags=re.IGNORECASE):
+            return ""
+        return line
+
+    @staticmethod
+    def _clean_source_entry(line: str) -> str:
+        line = re.sub(r'^TYPE=[^:\s]+(?:\s*[:\-—–]\s*|\s+)', '', line.strip())
+        return line.strip()
+
+    @staticmethod
+    def _is_fixed_header(line: str) -> bool:
+        normalized = line.strip().rstrip(":").lower()
+        return normalized in {
+            "исправленный список",
+            "исправленный список литературы",
+            "fixed list",
+            "corrected list",
+            "修正列表",
+        }
+
+    @staticmethod
+    def _is_missing_header(line: str) -> bool:
+        normalized = line.strip().rstrip(":").lower()
+        return normalized in {
+            "не хватает данных",
+            "недостающие данные",
+            "missing data",
+            "缺少数据",
+        }
+
+    @staticmethod
+    def _looks_like_missing_line(line: str) -> bool:
+        normalized = line.lower()
+        return (
+            normalized.startswith("не хватает")
+            or normalized.startswith("недоста")
+            or "не является библиографическим источником" in normalized
+            or normalized.startswith("missing")
+        )
+
+    @staticmethod
+    def _renumber_lines(lines: List[str]) -> List[str]:
+        result = []
+        for index, line in enumerate(lines, start=1):
+            content = re.sub(r'^\d+[\.\)]\s*', '', line).strip()
+            if content:
+                result.append(f"{index}. {content}")
+        return result
+
+    @staticmethod
+    def _filter_empty_missing_lines(lines: List[str]) -> List[str]:
+        empty_markers = {
+            "",
+            "-",
+            "—",
+            "нет",
+            "отсутствуют",
+            "не требуется",
+            "данных нет",
+            "блок отсутствует",
+            "отсутствует блок",
+        }
+        result = []
+        for line in lines:
+            content = re.sub(r'^\d+[\.\)]\s*', '', line).strip()
+            normalized = content.strip(" .;:-—()").lower()
+            if normalized in empty_markers:
+                continue
+            result.append(line)
+        return result
 
     def _log_raw_response(self, raw_text: str, input_lines: List[str]):
         """Логирование необработанного ответа ИИ"""
@@ -274,6 +423,146 @@ class YandexGPTProvider(AIProvider):
         return "YandexGPT"
 
 
+# ==================== GIGACHAT PROVIDER ====================
+
+class GigaChatProvider(YandexGPTProvider):
+    """Провайдер: GigaChat API."""
+
+    SCOPE = "GIGACHAT_API_PERS"
+    ROOT_CA_URL = "https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt"
+
+    def __init__(self, client_id: str = None):
+        self.client_id = client_id or os.getenv("GIGACHAT_CLIENT_ID")
+        self.oauth_url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+        self.chat_url = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
+        self._access_token = None
+        self.verify_bundle = self._get_verify_bundle()
+
+        if not self.client_id:
+            raise ValueError(
+                "GigaChat Authorization Key не найден!\n"
+                "Укажи его в настройках ИИ-агента."
+            )
+
+    def fix_text(self, text_lines: List[str], rules_context: str = "", ui_language: str = "ru_RU") -> Dict:
+        """Исправление текста через GigaChat."""
+        try:
+            prompt = self._build_prompt(text_lines, ui_language)
+            token = self._get_access_token()
+            payload = {
+                "model": "GigaChat",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "Ты — эксперт по оформлению академических работ по ГОСТ Р 7.0.100-2018 для РФ."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                "temperature": 0.1,
+                "stream": False
+            }
+            response = requests.post(
+                self.chat_url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                },
+                json=payload,
+                timeout=60,
+                verify=self.verify_bundle
+            )
+
+            if response.status_code != 200:
+                self._log_error(f"HTTP {response.status_code}", response.text)
+                return {
+                    'success': False,
+                    'error': f"Ошибка API GigaChat: {response.status_code}\n{response.text}",
+                    'provider': self.get_name(),
+                    'timestamp': datetime.now().isoformat()
+                }
+
+            result = response.json()
+            fixed_text = result["choices"][0]["message"]["content"]
+            self._log_raw_response(fixed_text, text_lines)
+            return {
+                'success': True,
+                'fixed_lines': self._parse_response(fixed_text, text_lines),
+                'raw_response': fixed_text,
+                'provider': self.get_name(),
+                'timestamp': datetime.now().isoformat()
+            }
+        except Exception as e:
+            self._log_error(str(e), traceback.format_exc())
+            return {
+                'success': False,
+                'error': str(e),
+                'provider': self.get_name(),
+                'timestamp': datetime.now().isoformat()
+            }
+
+    def _get_access_token(self) -> str:
+        if self._access_token:
+            return self._access_token
+
+        response = requests.post(
+            self.oauth_url,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+                "RqUID": str(uuid.uuid4()),
+                "Authorization": f"Basic {self._normalize_authorization_key(self.client_id)}"
+            },
+            data={"scope": self.SCOPE},
+            timeout=30,
+            verify=self.verify_bundle
+        )
+        if response.status_code != 200:
+            self._log_error(f"OAuth HTTP {response.status_code}", response.text)
+            raise ValueError(f"Не удалось получить токен GigaChat: {response.status_code}\n{response.text}")
+
+        self._access_token = response.json()["access_token"]
+        return self._access_token
+
+    @staticmethod
+    def _normalize_authorization_key(value: str) -> str:
+        value = (value or "").strip()
+        if value.lower().startswith("basic "):
+            value = value[6:].strip()
+        if ":" in value and " " not in value:
+            return base64.b64encode(value.encode("utf-8")).decode("ascii")
+        return value
+
+    def _get_verify_bundle(self) -> str:
+        cert_dir = Path.cwd() / "data" / "certs"
+        cert_dir.mkdir(parents=True, exist_ok=True)
+        bundle_path = cert_dir / "gigachat_ca_bundle.pem"
+        root_ca_path = cert_dir / "russian_trusted_root_ca_pem.crt"
+
+        if not root_ca_path.exists():
+            self._download_root_ca(root_ca_path)
+
+        if not bundle_path.exists() or root_ca_path.stat().st_mtime > bundle_path.stat().st_mtime:
+            shutil.copyfile(certifi.where(), bundle_path)
+            with open(root_ca_path, "rb") as src, open(bundle_path, "ab") as dst:
+                dst.write(b"\n")
+                dst.write(src.read())
+
+        return str(bundle_path)
+
+    def _download_root_ca(self, target_path: Path):
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        response = requests.get(self.ROOT_CA_URL, timeout=30, verify=False)
+        response.raise_for_status()
+        target_path.write_bytes(response.content)
+
+    def get_name(self) -> str:
+        return "GigaChat"
+
+
 # ==================== MOCK PROVIDER ====================
 
 class MockProvider(AIProvider):
@@ -308,7 +597,7 @@ class AIProviderFactory:
     """Фабрика для создания провайдеров"""
 
     @staticmethod
-    def create_provider(provider_name: str) -> AIProvider:
+    def create_provider(provider_name: str, settings: Dict[str, str] = None) -> AIProvider:
         """
         Создание провайдера по имени
 
@@ -318,7 +607,15 @@ class AIProviderFactory:
         Returns:
             Экземпляр провайдера
         """
+        settings = settings or {}
         if provider_name == "yandex":
-            return YandexGPTProvider()
+            return YandexGPTProvider(
+                api_key=unprotect_secret(settings.get("yandex_api_key", "").strip()),
+                folder_id=unprotect_secret(settings.get("yandex_folder_id", "").strip())
+            )
+        if provider_name == "gigachat":
+            return GigaChatProvider(
+                client_id=unprotect_secret(settings.get("gigachat_client_id", "").strip())
+            )
         else:
             return MockProvider()

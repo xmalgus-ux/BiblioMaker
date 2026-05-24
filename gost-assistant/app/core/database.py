@@ -8,6 +8,9 @@ from datetime import datetime
 from typing import List, Dict, Optional
 import os
 
+from .env_loader import load_app_env
+from .secrets import protect_secret
+
 
 class GOSTDatabase:
     """Класс для управления базой данных приложения"""
@@ -75,15 +78,22 @@ class GOSTDatabase:
 
         cursor.execute("DROP TABLE IF EXISTS cache")
 
+        load_app_env()
+        env_yandex_api_key = protect_secret(os.getenv("YANDEX_API_KEY", ""))
+        env_yandex_folder_id = protect_secret(os.getenv("YANDEX_FOLDER_ID", ""))
+
         # Инициализация настроек по умолчанию
         default_settings = [
             ('ui_language', 'ru_RU', 'Язык интерфейса приложения'),
             ('theme', 'light', 'Тема оформления (light/dark)'),
-            ('default_provider', 'mock', 'ИИ-провайдер по умолчанию'),
+            ('default_provider', 'mock', 'ИИ-агент по умолчанию'),
             ('output_folder', '', 'Папка для сохранения результатов'),
             ('auto_backup', 'true', 'Автоматическое создание резервной копии'),
             ('check_updates', 'true', 'Автоматическая проверка обновлений'),
-            ('font_size', '12', 'Размер шрифта в интерфейсе')
+            ('font_size', '12', 'Размер шрифта в интерфейсе'),
+            ('yandex_api_key', env_yandex_api_key, 'API-ключ YandexGPT'),
+            ('yandex_folder_id', env_yandex_folder_id, 'Folder ID Yandex Cloud'),
+            ('gigachat_client_id', '', 'Authorization Key GigaChat')
         ]
 
         for key, value, desc in default_settings:
@@ -92,6 +102,24 @@ class GOSTDatabase:
                            OR IGNORE INTO settings (setting_key, setting_value, description)
             VALUES (?, ?, ?)
                            """, (key, value, desc))
+
+        # Если БД уже была создана до появления этих настроек, но значения пустые,
+        # подтягиваем их из .env и сразу сохраняем в защищенном виде.
+        env_secret_settings = {
+            "yandex_api_key": env_yandex_api_key,
+            "yandex_folder_id": env_yandex_folder_id,
+        }
+        for key, value in env_secret_settings.items():
+            if not value:
+                continue
+            cursor.execute(
+                """
+                UPDATE settings
+                SET setting_value = ?
+                WHERE setting_key = ? AND setting_value = ''
+                """,
+                (value, key)
+            )
 
         conn.commit()
         conn.close()

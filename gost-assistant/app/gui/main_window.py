@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QProgressBar, QMessageBox, QSplitter, QGroupBox,
     QComboBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QTabWidget, QLineEdit, QDialog, QDialogButtonBox, QFormLayout,
-    QSizePolicy, QSpinBox, QCheckBox,
+    QSizePolicy, QCheckBox,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QAction, QColor
@@ -24,6 +24,7 @@ from app.core.database import GOSTDatabase
 from app.core.docx_processor import DocxProcessor
 from app.core.ai_providers import AIProviderFactory
 from app.core.source_classifier import classify_entry, analyze_entry
+from app.core.secrets import protect_secret, unprotect_secret
 from typing import List, Optional
 
 
@@ -37,6 +38,7 @@ class ProcessingThread(QThread):
     def __init__(self, file_path: str = None, entries: List[str] = None,
                  prompt_entries: List[str] = None,
                  provider_name: str = None,
+                 provider_settings: dict = None,
                  ui_language: str = "ru_RU"):
         """
         Инициализация потока
@@ -45,13 +47,14 @@ class ProcessingThread(QThread):
             file_path: Путь к файлу (для режима файла)
             entries: Список записей (для ручного режима)
             prompt_entries: Записи для промпта (с TYPE=...)
-            provider_name: Название ИИ-провайдера
+            provider_name: Название ИИ-агента
         """
         super().__init__()
         self.file_path = file_path
         self.entries = entries
         self.prompt_entries = prompt_entries
         self.provider_name = provider_name
+        self.provider_settings = provider_settings or {}
         self.ui_language = ui_language
         self._cancel_requested = False
 
@@ -92,7 +95,7 @@ class ProcessingThread(QThread):
             self.progress.emit(50, f"Обработка через {self.provider_name}...")
 
             # Создание провайдера
-            provider = AIProviderFactory.create_provider(self.provider_name)
+            provider = AIProviderFactory.create_provider(self.provider_name, self.provider_settings)
 
             # Обработка через ИИ
             prompt_entries = self.prompt_entries or raw_entries
@@ -126,6 +129,312 @@ class ProcessingThread(QThread):
             self.error.emit(f"Ошибка обработки: {str(e)}\n{traceback.format_exc()}")
 
 
+class AIProviderSettingsDialog(QDialog):
+    """Диалог настройки параметров ИИ-агента."""
+
+    SECRET_PLACEHOLDER = "********"
+
+    def __init__(self, parent=None, db=None):
+        super().__init__(parent)
+        self.db = db
+        self._stored_api_key = ""
+        self._stored_folder_id = ""
+        self._stored_gigachat_client_id = ""
+        self.lang = "ru_RU"
+        if parent is not None and hasattr(parent, "settings"):
+            self.lang = parent.settings.get("ui_language", "ru_RU")
+        elif db:
+            self.lang = db.get_setting("ui_language", "ru_RU")
+        self.setMinimumWidth(520)
+        self.setup_ui()
+        self.load_settings()
+
+    def _texts(self):
+        texts = {
+            "ru_RU": {
+                "title": "Настройка ИИ-агента",
+                "provider": "ИИ-агент:",
+                "api_key": "YANDEX_API_KEY:",
+                "folder_id": "YANDEX_FOLDER_ID:",
+                "gigachat_client_id": "Authorization Key:",
+                "api_placeholder": "Введите API-ключ Yandex Cloud",
+                "folder_placeholder": "Введите Folder ID",
+                "gigachat_client_placeholder": "Введите Authorization Key из настроек API",
+                "gigachat_help": "Как получить Authorization Key",
+                "gigachat_help_title": "Настройка GigaChat",
+                "gigachat_help_text": (
+                    "1. Перейдите по ссылке https://developers.sber.ru/portal/products/gigachat-api и зарегистрируйтесь.\n"
+                    "2. Перейдите в личный кабинет.\n"
+                    "3. Создайте новый проект с GigaChat API или выберите существующий проект.\n"
+                    "4. Перейдите в созданный проект и нажмите кнопку \"Настроить API\".\n"
+                    "5. Сгенерируйте Authorization Key, если он еще не создан.\n"
+                    "6. Скопируйте значение поля Authorization Key и вставьте его сюда."
+                ),
+                "show_key": "Показать значения",
+                "save": "Сохранить",
+                "cancel": "Отмена",
+                "saved_title": "Успех",
+                "saved_text": "Настройки ИИ-агента сохранены.",
+                "missing_title": "Не заполнены данные",
+                "missing_text": "Заполнены не все обязательные поля выбранного ИИ-агента.",
+                "providers": {"mock": "Mock (тестовый)", "yandex": "YandexGPT", "gigachat": "GigaChat"},
+            },
+            "en_US": {
+                "title": "AI Agent Settings",
+                "provider": "AI agent:",
+                "api_key": "YANDEX_API_KEY:",
+                "folder_id": "YANDEX_FOLDER_ID:",
+                "gigachat_client_id": "Authorization Key:",
+                "api_placeholder": "Enter Yandex Cloud API key",
+                "folder_placeholder": "Enter Folder ID",
+                "gigachat_client_placeholder": "Enter Authorization Key from API settings",
+                "gigachat_help": "How to get Authorization Key",
+                "gigachat_help_title": "GigaChat Setup",
+                "gigachat_help_text": (
+                    "1. Open https://developers.sber.ru/portal/products/gigachat-api and register.\n"
+                    "2. Go to your personal account.\n"
+                    "3. Create a new GigaChat API project or select an existing project.\n"
+                    "4. Open the project and click \"Configure API\".\n"
+                    "5. Generate Authorization Key if it has not been created yet.\n"
+                    "6. Copy the Authorization Key value and paste it here."
+                ),
+                "show_key": "Show values",
+                "save": "Save",
+                "cancel": "Cancel",
+                "saved_title": "Success",
+                "saved_text": "AI agent settings saved.",
+                "missing_title": "Missing data",
+                "missing_text": "Some required fields for the selected AI agent are empty.",
+                "providers": {"mock": "Mock (test)", "yandex": "YandexGPT", "gigachat": "GigaChat"},
+            },
+            "zh_CN": {
+                "title": "AI 智能体设置",
+                "provider": "AI 智能体:",
+                "api_key": "YANDEX_API_KEY:",
+                "folder_id": "YANDEX_FOLDER_ID:",
+                "gigachat_client_id": "Authorization Key:",
+                "api_placeholder": "输入 Yandex Cloud API key",
+                "folder_placeholder": "输入 Folder ID",
+                "gigachat_client_placeholder": "输入 API 设置中的 Authorization Key",
+                "gigachat_help": "如何获取 Authorization Key",
+                "gigachat_help_title": "GigaChat 设置",
+                "gigachat_help_text": (
+                    "1. 打开 https://developers.sber.ru/portal/products/gigachat-api 并注册。\n"
+                    "2. 进入个人账户。\n"
+                    "3. 创建新的 GigaChat API 项目或选择现有项目。\n"
+                    "4. 打开项目并点击 \"Configure API\"。\n"
+                    "5. 如尚未创建，请生成 Authorization Key。\n"
+                    "6. 复制 Authorization Key 的值并粘贴到这里。"
+                ),
+                "show_key": "显示值",
+                "save": "保存",
+                "cancel": "取消",
+                "saved_title": "成功",
+                "saved_text": "AI 智能体设置已保存。",
+                "missing_title": "缺少数据",
+                "missing_text": "所选 AI 智能体的必填字段未填写。",
+                "providers": {"mock": "Mock（测试）", "yandex": "YandexGPT", "gigachat": "GigaChat"},
+            },
+        }
+        return texts.get(self.lang, texts["ru_RU"])
+
+    def setup_ui(self):
+        text = self._texts()
+        self.setWindowTitle(text["title"])
+        layout = QVBoxLayout(self)
+
+        form = QFormLayout()
+
+        self.provider_combo = QComboBox()
+        self.provider_combo.addItem(text["providers"]["mock"], "mock")
+        self.provider_combo.addItem(text["providers"]["yandex"], "yandex")
+        self.provider_combo.addItem(text["providers"]["gigachat"], "gigachat")
+        self.provider_combo.currentIndexChanged.connect(self._update_fields_state)
+        form.addRow(text["provider"], self.provider_combo)
+
+        self.yandex_api_label = QLabel(text["api_key"])
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setPlaceholderText(text["api_placeholder"])
+        self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow(self.yandex_api_label, self.api_key_input)
+
+        self.yandex_folder_label = QLabel(text["folder_id"])
+        self.folder_id_input = QLineEdit()
+        self.folder_id_input.setPlaceholderText(text["folder_placeholder"])
+        self.folder_id_input.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow(self.yandex_folder_label, self.folder_id_input)
+
+        self.gigachat_client_label = QLabel(text["gigachat_client_id"])
+        self.gigachat_client_input = QLineEdit()
+        self.gigachat_client_input.setPlaceholderText(text["gigachat_client_placeholder"])
+        self.gigachat_client_input.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow(self.gigachat_client_label, self.gigachat_client_input)
+
+        layout.addLayout(form)
+
+        self.show_key_check = QCheckBox(text["show_key"])
+        self.show_key_check.toggled.connect(self._toggle_key_visibility)
+        layout.addWidget(self.show_key_check)
+
+        self.gigachat_help_button = QPushButton(text["gigachat_help"])
+        self.gigachat_help_button.clicked.connect(self.show_gigachat_help)
+        layout.addWidget(self.gigachat_help_button)
+
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save |
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        self.buttons.button(QDialogButtonBox.StandardButton.Save).setText(text["save"])
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(text["cancel"])
+        self.buttons.accepted.connect(self.save_settings)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+    def load_settings(self):
+        if not self.db:
+            return
+        settings = self.db.get_all_settings()
+        provider = settings.get("default_provider", "mock")
+        index = self.provider_combo.findData(provider)
+        if index >= 0:
+            self.provider_combo.setCurrentIndex(index)
+        self._stored_api_key = settings.get("yandex_api_key", "")
+        self._stored_folder_id = settings.get("yandex_folder_id", "")
+        self._stored_gigachat_client_id = settings.get("gigachat_client_id", "")
+        if self._stored_api_key:
+            self.api_key_input.setText(self.SECRET_PLACEHOLDER)
+        if self._stored_folder_id:
+            self.folder_id_input.setText(self.SECRET_PLACEHOLDER)
+        if self._stored_gigachat_client_id:
+            self.gigachat_client_input.setText(self.SECRET_PLACEHOLDER)
+        self._update_fields_state()
+
+    def save_settings(self):
+        if not self.db:
+            return
+
+        provider = self.provider_combo.currentData() or "mock"
+        api_key = self._resolve_secret_input(self.api_key_input.text().strip(), self._stored_api_key)
+        folder_id = self._resolve_secret_input(self.folder_id_input.text().strip(), self._stored_folder_id)
+        gigachat_client_id = self._resolve_secret_input(
+            self.gigachat_client_input.text().strip(),
+            self._stored_gigachat_client_id
+        )
+
+        if provider == "yandex" and (not api_key or not folder_id):
+            text = self._texts()
+            QMessageBox.warning(self, text["missing_title"], text["missing_text"])
+            return
+        if provider == "gigachat" and not gigachat_client_id:
+            text = self._texts()
+            QMessageBox.warning(self, text["missing_title"], text["missing_text"])
+            return
+
+        self.db.set_setting("default_provider", provider)
+        self.db.set_setting("yandex_api_key", protect_secret(api_key))
+        self.db.set_setting("yandex_folder_id", protect_secret(folder_id))
+        self.db.set_setting("gigachat_client_id", protect_secret(gigachat_client_id))
+
+        if self.parent() is not None and hasattr(self.parent(), "settings"):
+            self.parent().settings = self.db.get_all_settings()
+
+        text = self._texts()
+        QMessageBox.information(self, text["saved_title"], text["saved_text"])
+        self.accept()
+
+    def _toggle_key_visibility(self, checked: bool):
+        if checked:
+            self._reveal_stored_secret(self.api_key_input, self._stored_api_key)
+            self._reveal_stored_secret(self.folder_id_input, self._stored_folder_id)
+            self._reveal_stored_secret(self.gigachat_client_input, self._stored_gigachat_client_id)
+        mode = QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+        self.api_key_input.setEchoMode(mode)
+        self.folder_id_input.setEchoMode(mode)
+        self.gigachat_client_input.setEchoMode(mode)
+
+    def _update_fields_state(self):
+        provider = self.provider_combo.currentData()
+        is_yandex = provider == "yandex"
+        is_gigachat = provider == "gigachat"
+
+        for widget in (self.yandex_api_label, self.api_key_input, self.yandex_folder_label, self.folder_id_input):
+            widget.setVisible(is_yandex)
+            widget.setEnabled(is_yandex)
+
+        for widget in (
+            self.gigachat_client_label,
+            self.gigachat_client_input,
+            self.gigachat_help_button,
+        ):
+            widget.setVisible(is_gigachat)
+            widget.setEnabled(is_gigachat)
+
+        self.show_key_check.setEnabled(is_yandex or is_gigachat)
+
+    def _resolve_secret_input(self, input_value: str, stored_value: str) -> str:
+        if input_value == self.SECRET_PLACEHOLDER and stored_value:
+            return unprotect_secret(stored_value)
+        return input_value
+
+    def _reveal_stored_secret(self, widget: QLineEdit, stored_value: str):
+        if widget.text().strip() == self.SECRET_PLACEHOLDER and stored_value:
+            widget.setText(unprotect_secret(stored_value))
+
+    def show_gigachat_help(self):
+        text = self._texts()
+        QMessageBox.information(self, text["gigachat_help_title"], text["gigachat_help_text"])
+
+
+class FontSizeInput(QWidget):
+    """Компактный контрол размера шрифта в стиле приложения."""
+
+    def __init__(self, minimum: int = 9, maximum: int = 18, value: int = 12, parent=None):
+        super().__init__(parent)
+        self.minimum = minimum
+        self.maximum = maximum
+        self._value = value
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        self.value_input = QLineEdit()
+        self.value_input.setReadOnly(True)
+        self.value_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.value_input.setFixedHeight(32)
+        layout.addWidget(self.value_input, 1)
+
+        button_column = QWidget()
+        button_layout = QVBoxLayout(button_column)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.setSpacing(2)
+
+        self.btn_increase = QPushButton("+")
+        self.btn_increase.setObjectName("spinButton")
+        self.btn_increase.setFixedSize(26, 16)
+        self.btn_increase.clicked.connect(lambda: self.setValue(self._value + 1))
+        button_layout.addWidget(self.btn_increase)
+
+        self.btn_decrease = QPushButton("-")
+        self.btn_decrease.setObjectName("spinButton")
+        self.btn_decrease.setFixedSize(26, 16)
+        self.btn_decrease.clicked.connect(lambda: self.setValue(self._value - 1))
+        button_layout.addWidget(self.btn_decrease)
+
+        layout.addWidget(button_column)
+
+        self.setValue(value)
+
+    def value(self) -> int:
+        return self._value
+
+    def setValue(self, value: int):
+        self._value = max(self.minimum, min(self.maximum, int(value)))
+        self.value_input.setText(str(self._value))
+        self.btn_decrease.setEnabled(self._value > self.minimum)
+        self.btn_increase.setEnabled(self._value < self.maximum)
+
+
 class SettingsDialog(QDialog):
     """Диалог настроек приложения"""
 
@@ -148,7 +457,7 @@ class SettingsDialog(QDialog):
                 "title": "Настройки",
                 "ui_language": "Язык интерфейса:",
                 "theme": "Тема оформления:",
-                "default_provider": "ИИ-провайдер:",
+                "default_provider": "ИИ-агент:",
                 "output_folder": "Папка для сохранения:",
                 "auto_backup_row": "Резервная копия:",
                 "font_size": "Размер шрифта:",
@@ -159,14 +468,15 @@ class SettingsDialog(QDialog):
                 "saved_text": "Настройки сохранены!",
                 "save": "Сохранить",
                 "cancel": "Отмена",
+                "provider_settings": "Настройка ИИ-агента",
                 "themes": {"light": "Светлая", "dark": "Темная"},
-                "providers": {"mock": "Mock (тестовый)", "yandex": "YandexGPT"},
+                "providers": {"mock": "Mock (тестовый)", "yandex": "YandexGPT", "gigachat": "GigaChat"},
             },
             "en_US": {
                 "title": "Settings",
                 "ui_language": "Interface language:",
                 "theme": "Theme:",
-                "default_provider": "AI provider:",
+                "default_provider": "AI agent:",
                 "output_folder": "Save folder:",
                 "auto_backup_row": "Backup:",
                 "font_size": "Font size:",
@@ -177,14 +487,15 @@ class SettingsDialog(QDialog):
                 "saved_text": "Settings saved!",
                 "save": "Save",
                 "cancel": "Cancel",
+                "provider_settings": "AI agent settings",
                 "themes": {"light": "Light", "dark": "Dark"},
-                "providers": {"mock": "Mock (test)", "yandex": "YandexGPT"},
+                "providers": {"mock": "Mock (test)", "yandex": "YandexGPT", "gigachat": "GigaChat"},
             },
             "zh_CN": {
                 "title": "设置",
                 "ui_language": "界面语言:",
                 "theme": "主题:",
-                "default_provider": "AI 提供商:",
+                "default_provider": "AI 智能体:",
                 "output_folder": "保存文件夹:",
                 "auto_backup_row": "备份:",
                 "font_size": "字体大小:",
@@ -195,8 +506,9 @@ class SettingsDialog(QDialog):
                 "saved_text": "设置已保存!",
                 "save": "保存",
                 "cancel": "取消",
+                "provider_settings": "AI 智能体设置",
                 "themes": {"light": "浅色", "dark": "深色"},
-                "providers": {"mock": "Mock（测试）", "yandex": "YandexGPT"},
+                "providers": {"mock": "Mock（测试）", "yandex": "YandexGPT", "gigachat": "GigaChat"},
             },
         }
         return texts.get(self.lang, texts["ru_RU"])
@@ -240,11 +552,13 @@ class SettingsDialog(QDialog):
         self.settings_inputs["auto_backup"] = auto_backup
         self._add_setting_row("auto_backup_row", auto_backup)
 
-        font_size = QSpinBox()
-        font_size.setRange(9, 18)
-        font_size.setSingleStep(1)
+        font_size = FontSizeInput(9, 18, 12)
         self.settings_inputs["font_size"] = font_size
         self._add_setting_row("font_size", font_size)
+
+        self.btn_provider_settings = QPushButton()
+        self.btn_provider_settings.clicked.connect(self.open_provider_settings)
+        self.form_layout.addRow(self.btn_provider_settings)
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save |
@@ -286,6 +600,7 @@ class SettingsDialog(QDialog):
         for key, label in self.setting_labels.items():
             label.setText(text.get(key, text.get(key.replace("_row", ""), key)))
         self.btn_browse_folder.setText(text["browse"])
+        self.btn_provider_settings.setText(text["provider_settings"])
         self.settings_inputs["auto_backup"].setText(text["auto_backup"])
         self.buttons.button(QDialogButtonBox.StandardButton.Save).setText(text["save"])
         self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(text["cancel"])
@@ -295,9 +610,14 @@ class SettingsDialog(QDialog):
         )
         self._set_combo_items(
             self.settings_inputs["default_provider"],
-            [(text["providers"]["mock"], "mock"), (text["providers"]["yandex"], "yandex")]
+            [
+                (text["providers"]["mock"], "mock"),
+                (text["providers"]["yandex"], "yandex"),
+                (text["providers"]["gigachat"], "gigachat")
+            ]
         )
         self._fit_button_text(self.btn_browse_folder)
+        self._fit_button_text(self.btn_provider_settings)
         self._fit_button_text(self.buttons.button(QDialogButtonBox.StandardButton.Save))
         self._fit_button_text(self.buttons.button(QDialogButtonBox.StandardButton.Cancel))
 
@@ -310,6 +630,17 @@ class SettingsDialog(QDialog):
         )
         if folder:
             self.settings_inputs["output_folder"].setText(folder)
+
+    def open_provider_settings(self):
+        dialog = AIProviderSettingsDialog(self, self.db)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            settings = self.db.get_all_settings()
+            provider = settings.get("default_provider", "mock")
+            provider_input = self.settings_inputs.get("default_provider")
+            if isinstance(provider_input, QComboBox):
+                index = provider_input.findData(provider)
+                if index >= 0:
+                    provider_input.setCurrentIndex(index)
 
     def load_settings(self):
         """Загрузка настроек из БД"""
@@ -338,7 +669,7 @@ class SettingsDialog(QDialog):
                     widget.setCurrentIndex(index)
             elif isinstance(widget, QCheckBox):
                 widget.setChecked(value.lower() == "true")
-            elif isinstance(widget, QSpinBox):
+            elif isinstance(widget, FontSizeInput):
                 widget.setValue(int(value) if str(value).isdigit() else 12)
             else:
                 widget.setText(value)
@@ -353,7 +684,7 @@ class SettingsDialog(QDialog):
                 value = widget.currentData()
             elif isinstance(widget, QCheckBox):
                 value = "true" if widget.isChecked() else "false"
-            elif isinstance(widget, QSpinBox):
+            elif isinstance(widget, FontSizeInput):
                 value = str(widget.value())
             else:
                 value = widget.text()
@@ -636,8 +967,8 @@ class BiblioMakerWindow(QMainWindow):
                 "history_tab": "История",
                 "ready": "Готов к работе",
                 "open_document": "Открыть документ",
-                "provider": "ИИ-провайдер:",
-                "process": "Исправить по ГОСТ",
+                "provider": "ИИ-агент:",
+                "process": "Исправить",
                 "cancel": "Отмена",
                 "save": "Сохранить",
                 "settings": "Настройки",
@@ -646,7 +977,7 @@ class BiblioMakerWindow(QMainWindow):
                 "docx_file": "Файл .docx",
                 "original_list": "Исходный список",
                 "fixed_list": "Исправленный список",
-                "history_headers": ["Дата", "Провайдер", "Исходный текст", "Результат"],
+                "history_headers": ["Дата", "ИИ-агент", "Исходный текст", "Результат"],
                 "refresh": "Обновить",
                 "clear_history": "Очистить историю",
                 "logs": "Логи",
@@ -658,7 +989,7 @@ class BiblioMakerWindow(QMainWindow):
                 "history_tab": "History",
                 "ready": "Ready",
                 "open_document": "Open document",
-                "provider": "AI provider:",
+                "provider": "AI agent:",
                 "process": "Fix by GOST",
                 "cancel": "Cancel",
                 "save": "Save",
@@ -668,7 +999,7 @@ class BiblioMakerWindow(QMainWindow):
                 "docx_file": ".docx file",
                 "original_list": "Original list",
                 "fixed_list": "Fixed list",
-                "history_headers": ["Date", "Provider", "Original text", "Result"],
+                "history_headers": ["Date", "AI agent", "Original text", "Result"],
                 "refresh": "Refresh",
                 "clear_history": "Clear history",
                 "logs": "Logs",
@@ -680,7 +1011,7 @@ class BiblioMakerWindow(QMainWindow):
                 "history_tab": "历史",
                 "ready": "就绪",
                 "open_document": "打开文档",
-                "provider": "AI 提供商:",
+                "provider": "AI 智能体:",
                 "process": "按 GOST 修正",
                 "cancel": "取消",
                 "save": "保存",
@@ -690,7 +1021,7 @@ class BiblioMakerWindow(QMainWindow):
                 "docx_file": ".docx 文件",
                 "original_list": "原始列表",
                 "fixed_list": "修正列表",
-                "history_headers": ["日期", "提供商", "原始文本", "结果"],
+                "history_headers": ["日期", "AI 智能体", "原始文本", "结果"],
                 "refresh": "刷新",
                 "clear_history": "清空历史",
                 "logs": "日志",
@@ -762,7 +1093,7 @@ class BiblioMakerWindow(QMainWindow):
         self.provider_label = QLabel(self._t("provider"))
         panel.addWidget(self.provider_label)
         self.provider_combo = QComboBox()
-        self.provider_combo.addItems(['mock', 'yandex'])
+        self.provider_combo.addItems(['mock', 'yandex', 'gigachat'])
         panel.addWidget(self.provider_combo)
 
         # Кнопка обработки
@@ -1019,6 +1350,7 @@ class BiblioMakerWindow(QMainWindow):
             entries=entries,
             prompt_entries=prompt_entries,
             provider_name=provider_name,
+            provider_settings=self.db.get_all_settings(),
             ui_language=self.settings.get("ui_language", "ru_RU")
         )
         self.processing_thread.progress.connect(self.update_progress)
@@ -1063,7 +1395,7 @@ class BiblioMakerWindow(QMainWindow):
 
         self.statusLabel.setText(
             f"Обработано! Изменений: {result['changes_count']} | "
-            f"Провайдер: {result['provider']}"
+            f"ИИ-агент: {result['provider']}"
         )
 
         QMessageBox.information(
@@ -1071,7 +1403,7 @@ class BiblioMakerWindow(QMainWindow):
             f"Обработка завершена!\n\n"
             f"Источников: {result['sources_count']}\n"
             f"Изменений: {result['changes_count']}\n"
-            f"Провайдер: {result['provider']}"
+            f"ИИ-агент: {result['provider']}"
         )
 
     def processing_error(self, error: str):
@@ -1180,9 +1512,9 @@ class BiblioMakerWindow(QMainWindow):
     def open_settings(self):
         """Открытие диалога настроек"""
         dialog = SettingsDialog(self, self.db)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.settings = self.db.get_all_settings()
-            self._apply_settings_to_widgets()
+        dialog.exec()
+        self.settings = self.db.get_all_settings()
+        self._apply_settings_to_widgets()
 
     def _apply_settings_to_widgets(self):
         """Применение сохраненных настроек к открытому окну."""
@@ -1351,6 +1683,15 @@ class BiblioMakerWindow(QMainWindow):
                 color: {disabled_text};
                 background: {tab};
             }}
+            QPushButton#spinButton {{
+                padding: 0;
+                min-width: 26px;
+                max-width: 26px;
+                min-height: 16px;
+                max-height: 16px;
+                font-size: 9pt;
+                font-weight: 600;
+            }}
             QPushButton#primary {{
                 background: #2563eb;
                 color: #ffffff;
@@ -1363,7 +1704,7 @@ class BiblioMakerWindow(QMainWindow):
                 border: 1px solid #dc2626;
                 font-weight: 600;
             }}
-            QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox {{
+            QLineEdit, QTextEdit, QPlainTextEdit, QComboBox {{
                 background: {input};
                 border: 1px solid {border};
                 border-radius: 8px;
@@ -1372,7 +1713,7 @@ class BiblioMakerWindow(QMainWindow):
                 selection-color: {selection_text};
                 color: {text};
             }}
-            QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled, QComboBox:disabled, QSpinBox:disabled {{
+            QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled, QComboBox:disabled {{
                 color: {disabled_text};
                 background: {pane};
             }}
@@ -1387,14 +1728,6 @@ class BiblioMakerWindow(QMainWindow):
                 selection-background-color: {selection};
                 selection-color: {selection_text};
                 outline: none;
-            }}
-            QSpinBox::up-button, QSpinBox::down-button {{
-                background: {button};
-                border: 1px solid {border};
-                width: 18px;
-            }}
-            QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
-                background: {button_hover};
             }}
             QMenu {{
                 background: {pane};

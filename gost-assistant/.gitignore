@@ -21,4 +21,5 @@ key.json
 
 # Данные
 data/*.db
+data/certs/
 *.log
