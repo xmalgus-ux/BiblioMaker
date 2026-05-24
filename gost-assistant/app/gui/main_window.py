@@ -29,7 +29,11 @@ from typing import List, Optional
 
 
 class ProcessingThread(QThread):
-    """Поток обработки документа"""
+    """Фоновый поток обработки документа.
+
+    Все сетевые запросы к ИИ-агентам выполняются здесь, чтобы главное окно
+    PyQt не зависало во время долгой обработки.
+    """
     progress = pyqtSignal(int, str)
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
@@ -69,6 +73,7 @@ class ProcessingThread(QThread):
         return False
 
     def run(self):
+        """Основной сценарий обработки: получить записи, вызвать ИИ и вернуть результат."""
         try:
             self.progress.emit(10, "Подготовка данных...")
             if self._check_cancel():
@@ -130,7 +135,11 @@ class ProcessingThread(QThread):
 
 
 class AIProviderSettingsDialog(QDialog):
-    """Диалог настройки параметров ИИ-агента."""
+    """Диалог настройки параметров ИИ-агента.
+
+    Позволяет выбрать агент, ввести ключи доступа и сохранить их в локальную
+    БД. Секреты отображаются как пароль и сохраняются через protect_secret().
+    """
 
     SECRET_PLACEHOLDER = "********"
 
@@ -177,7 +186,7 @@ class AIProviderSettingsDialog(QDialog):
                 "saved_text": "Настройки ИИ-агента сохранены.",
                 "missing_title": "Не заполнены данные",
                 "missing_text": "Заполнены не все обязательные поля выбранного ИИ-агента.",
-                "providers": {"mock": "Mock (тестовый)", "yandex": "YandexGPT", "gigachat": "GigaChat"},
+                "providers": {"yandex": "YandexGPT", "gigachat": "GigaChat"},
             },
             "en_US": {
                 "title": "AI Agent Settings",
@@ -205,7 +214,7 @@ class AIProviderSettingsDialog(QDialog):
                 "saved_text": "AI agent settings saved.",
                 "missing_title": "Missing data",
                 "missing_text": "Some required fields for the selected AI agent are empty.",
-                "providers": {"mock": "Mock (test)", "yandex": "YandexGPT", "gigachat": "GigaChat"},
+                "providers": {"yandex": "YandexGPT", "gigachat": "GigaChat"},
             },
             "zh_CN": {
                 "title": "AI 智能体设置",
@@ -233,7 +242,7 @@ class AIProviderSettingsDialog(QDialog):
                 "saved_text": "AI 智能体设置已保存。",
                 "missing_title": "缺少数据",
                 "missing_text": "所选 AI 智能体的必填字段未填写。",
-                "providers": {"mock": "Mock（测试）", "yandex": "YandexGPT", "gigachat": "GigaChat"},
+                "providers": {"yandex": "YandexGPT", "gigachat": "GigaChat"},
             },
         }
         return texts.get(self.lang, texts["ru_RU"])
@@ -246,7 +255,6 @@ class AIProviderSettingsDialog(QDialog):
         form = QFormLayout()
 
         self.provider_combo = QComboBox()
-        self.provider_combo.addItem(text["providers"]["mock"], "mock")
         self.provider_combo.addItem(text["providers"]["yandex"], "yandex")
         self.provider_combo.addItem(text["providers"]["gigachat"], "gigachat")
         self.provider_combo.currentIndexChanged.connect(self._update_fields_state)
@@ -294,7 +302,9 @@ class AIProviderSettingsDialog(QDialog):
         if not self.db:
             return
         settings = self.db.get_all_settings()
-        provider = settings.get("default_provider", "mock")
+        provider = settings.get("default_provider", "yandex")
+        if provider == "mock":
+            provider = "yandex"
         index = self.provider_combo.findData(provider)
         if index >= 0:
             self.provider_combo.setCurrentIndex(index)
@@ -310,10 +320,11 @@ class AIProviderSettingsDialog(QDialog):
         self._update_fields_state()
 
     def save_settings(self):
+        """Проверить обязательные поля и сохранить настройки выбранного агента."""
         if not self.db:
             return
 
-        provider = self.provider_combo.currentData() or "mock"
+        provider = self.provider_combo.currentData() or "yandex"
         api_key = self._resolve_secret_input(self.api_key_input.text().strip(), self._stored_api_key)
         folder_id = self._resolve_secret_input(self.folder_id_input.text().strip(), self._stored_folder_id)
         gigachat_client_id = self._resolve_secret_input(
@@ -429,6 +440,7 @@ class FontSizeInput(QWidget):
         return self._value
 
     def setValue(self, value: int):
+        """Установить размер шрифта с ограничением по допустимому диапазону."""
         self._value = max(self.minimum, min(self.maximum, int(value)))
         self.value_input.setText(str(self._value))
         self.btn_decrease.setEnabled(self._value > self.minimum)
@@ -470,7 +482,7 @@ class SettingsDialog(QDialog):
                 "cancel": "Отмена",
                 "provider_settings": "Настройка ИИ-агента",
                 "themes": {"light": "Светлая", "dark": "Темная"},
-                "providers": {"mock": "Mock (тестовый)", "yandex": "YandexGPT", "gigachat": "GigaChat"},
+                "providers": {"yandex": "YandexGPT", "gigachat": "GigaChat"},
             },
             "en_US": {
                 "title": "Settings",
@@ -489,7 +501,7 @@ class SettingsDialog(QDialog):
                 "cancel": "Cancel",
                 "provider_settings": "AI agent settings",
                 "themes": {"light": "Light", "dark": "Dark"},
-                "providers": {"mock": "Mock (test)", "yandex": "YandexGPT", "gigachat": "GigaChat"},
+                "providers": {"yandex": "YandexGPT", "gigachat": "GigaChat"},
             },
             "zh_CN": {
                 "title": "设置",
@@ -508,7 +520,7 @@ class SettingsDialog(QDialog):
                 "cancel": "取消",
                 "provider_settings": "AI 智能体设置",
                 "themes": {"light": "浅色", "dark": "深色"},
-                "providers": {"mock": "Mock（测试）", "yandex": "YandexGPT", "gigachat": "GigaChat"},
+                "providers": {"yandex": "YandexGPT", "gigachat": "GigaChat"},
             },
         }
         return texts.get(self.lang, texts["ru_RU"])
@@ -611,7 +623,6 @@ class SettingsDialog(QDialog):
         self._set_combo_items(
             self.settings_inputs["default_provider"],
             [
-                (text["providers"]["mock"], "mock"),
                 (text["providers"]["yandex"], "yandex"),
                 (text["providers"]["gigachat"], "gigachat")
             ]
@@ -635,7 +646,9 @@ class SettingsDialog(QDialog):
         dialog = AIProviderSettingsDialog(self, self.db)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             settings = self.db.get_all_settings()
-            provider = settings.get("default_provider", "mock")
+            provider = settings.get("default_provider", "yandex")
+            if provider == "mock":
+                provider = "yandex"
             provider_input = self.settings_inputs.get("default_provider")
             if isinstance(provider_input, QComboBox):
                 index = provider_input.findData(provider)
@@ -697,7 +710,12 @@ class SettingsDialog(QDialog):
 
 
 class TypeResolutionDialog(QDialog):
-    """Диалог выбора типа источников и предупреждений о пропусках"""
+    """Диалог ручного уточнения типов источников.
+
+    Перед отправкой в ИИ пользователь видит все найденные записи и может
+    исправить автоматически определенный тип. Выбранный тип попадает в промпт
+    как служебный TYPE=... и помогает агенту применить нужный шаблон ГОСТ.
+    """
 
     TYPE_OPTIONS = [
         ("unknown", "Неизвестно"),
@@ -788,8 +806,8 @@ class TypeResolutionDialog(QDialog):
         texts = {
             "ru_RU": {
                 "title": "Уточните тип источников",
-                "info": "Некоторые источники не удалось распознать автоматически. Выберите тип для каждой строки.",
-                "headers": ["Исходная строка", "Тип источника", "Проблемы"],
+                "info": "Проверьте и при необходимости измените тип для каждой строки.",
+                "headers": ["Исходная строка", "Тип источника"],
                 "select_type_title": "Нужно выбрать тип",
                 "select_type_text": "Для всех строк выберите тип источника.",
                 "types": {
@@ -802,8 +820,8 @@ class TypeResolutionDialog(QDialog):
             },
             "en_US": {
                 "title": "Clarify Source Types",
-                "info": "Some sources could not be recognized automatically. Select a type for each row.",
-                "headers": ["Original row", "Source type", "Issues"],
+                "info": "Review and change the type for each row if needed.",
+                "headers": ["Original row", "Source type"],
                 "select_type_title": "Source type required",
                 "select_type_text": "Select a source type for every row.",
                 "types": {
@@ -816,8 +834,8 @@ class TypeResolutionDialog(QDialog):
             },
             "zh_CN": {
                 "title": "确认来源类型",
-                "info": "部分来源无法自动识别。请为每一行选择类型。",
-                "headers": ["原始行", "来源类型", "问题"],
+                "info": "请检查每一行的类型，必要时进行修改。",
+                "headers": ["原始行", "来源类型"],
                 "select_type_title": "需要选择类型",
                 "select_type_text": "请为所有行选择来源类型。",
                 "types": {
@@ -838,11 +856,10 @@ class TypeResolutionDialog(QDialog):
         layout.addWidget(info)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(3)
+        self.table.setColumnCount(2)
         self.table.setHorizontalHeaderLabels(self._t("headers"))
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(34)
         self.table.setRowCount(len(self.issue_rows))
@@ -855,7 +872,6 @@ class TypeResolutionDialog(QDialog):
         for row, item in enumerate(self.issue_rows):
             idx = item["index"]
             text = item["text"]
-            missing = item.get("missing", [])
             source_item = QTableWidgetItem(text)
             source_item.setBackground(bg)
             source_item.setForeground(fg)
@@ -867,10 +883,6 @@ class TypeResolutionDialog(QDialog):
             combo.setCurrentIndex(max(0, combo.findData(current_type)))
             combo.setMinimumWidth(220)
             self.table.setCellWidget(row, 1, combo)
-            missing_item = QTableWidgetItem(", ".join(missing))
-            missing_item.setBackground(bg)
-            missing_item.setForeground(fg)
-            self.table.setItem(row, 2, missing_item)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok |
@@ -946,7 +958,12 @@ class LogViewerDialog(QDialog):
 
 
 class BiblioMakerWindow(QMainWindow):
-    """Главное окно приложения"""
+    """Главное окно приложения.
+
+    Связывает GUI, работу с Word-документами, локальную БД и ИИ-агентов.
+    Отвечает за выбор входных данных, запуск обработки, показ результата и
+    сохранение исправленного списка.
+    """
 
     def __init__(self):
         super().__init__()
@@ -982,6 +999,7 @@ class BiblioMakerWindow(QMainWindow):
                 "clear_history": "Очистить историю",
                 "logs": "Логи",
                 "manual_placeholder": "Введите список литературы, каждый источник с новой строки:\n\nИванов А.А. Название книги. М.: Изд-во, 2020.\nПетров Б.Б. Статья // Журнал. 2021. № 3. С. 10-15.\nСидоров В.В. Сайт [Электронный ресурс]. URL: https://example.com",
+                "file_placeholder": "Нажмите «Открыть документ» и выберите файл .docx.\nВ документе должен быть раздел «Список литературы» или «Список использованных источников».\nЗаписи могут быть пронумерованы или оформлены списком.",
             },
             "en_US": {
                 "title": "BiblioMaker — GOST Formatting",
@@ -1004,6 +1022,7 @@ class BiblioMakerWindow(QMainWindow):
                 "clear_history": "Clear history",
                 "logs": "Logs",
                 "manual_placeholder": "Enter the bibliography, one source per line:\n\nIvanov A.A. Book title. Moscow: Publisher, 2020.\nPetrov B.B. Article // Journal. 2021. No. 3. P. 10-15.\nSidorov V.V. Site [Electronic resource]. URL: https://example.com",
+                "file_placeholder": "Click \"Open document\" and select a .docx file.\nThe document should contain a section named \"Список литературы\" or \"Список использованных источников\".\nEntries may be numbered or formatted as a list.",
             },
             "zh_CN": {
                 "title": "BiblioMaker — GOST 格式化",
@@ -1026,6 +1045,7 @@ class BiblioMakerWindow(QMainWindow):
                 "clear_history": "清空历史",
                 "logs": "日志",
                 "manual_placeholder": "请输入参考文献列表，每行一个来源:\n\nIvanov A.A. Book title. Moscow: Publisher, 2020.\nPetrov B.B. Article // Journal. 2021. No. 3. P. 10-15.\nSidorov V.V. Site [Electronic resource]. URL: https://example.com",
+                "file_placeholder": "点击“打开文档”并选择 .docx 文件。\n文档应包含章节：Список литературы 或 Список использованных источников。\n条目可以编号或使用列表格式。",
             },
         }
         lang = self.settings.get("ui_language", "ru_RU")
@@ -1093,7 +1113,7 @@ class BiblioMakerWindow(QMainWindow):
         self.provider_label = QLabel(self._t("provider"))
         panel.addWidget(self.provider_label)
         self.provider_combo = QComboBox()
-        self.provider_combo.addItems(['mock', 'yandex', 'gigachat'])
+        self.provider_combo.addItems(['yandex', 'gigachat'])
         panel.addWidget(self.provider_combo)
 
         # Кнопка обработки
@@ -1188,6 +1208,7 @@ class BiblioMakerWindow(QMainWindow):
         # Поле для просмотра из файла
         self.source_text = QTextEdit()
         self.source_text.setReadOnly(True)
+        self.source_text.setPlaceholderText(self._t("file_placeholder"))
         self.source_text.setFont(QFont("Cascadia Mono", 10))
         left_layout.addWidget(self.source_text)
 
@@ -1271,7 +1292,12 @@ class BiblioMakerWindow(QMainWindow):
         pass
 
     def _get_input_text(self) -> List[str]:
-        """Получение текста из текущего источника"""
+        """Получение записей из выбранного источника данных.
+
+        В ручном режиме каждая непустая строка считается отдельным источником.
+        В режиме файла используется DocxProcessor, который умеет собирать
+        многострочные записи из Word-документа.
+        """
         if self.radio_file.isChecked() and self.current_file_path:
             processor = DocxProcessor(self.current_file_path)
             return processor.extract_bibliography()
@@ -1282,7 +1308,7 @@ class BiblioMakerWindow(QMainWindow):
             return [line.strip() for line in text.split('\n') if line.strip()]
 
     def load_document(self):
-        """Загрузка документа"""
+        """Открыть .docx-файл и показать найденный список литературы."""
         self._set_input_mode('file')
 
         file_path, _ = QFileDialog.getOpenFileName(
@@ -1306,7 +1332,11 @@ class BiblioMakerWindow(QMainWindow):
                 QMessageBox.warning(self, "Ошибка", f"Не удалось прочитать документ: {e}")
 
     def process_document(self):
-        """Обработка документа"""
+        """Запустить обработку текущего списка литературы.
+
+        Сначала пользователь подтверждает типы всех источников, затем записи
+        отправляются в ProcessingThread вместе со служебными TYPE-префиксами.
+        """
         entries = self._get_input_text()
 
         if not entries:
@@ -1320,23 +1350,19 @@ class BiblioMakerWindow(QMainWindow):
 
         analysis = [analyze_entry(e) for e in entries]
         auto_types = [t for t, _ in analysis]
-        issue_rows = []
-        for i, (t, missing) in enumerate(analysis):
-            if t == "unknown" or missing:
-                issue_rows.append({
-                    "index": i,
-                    "text": entries[i],
-                    "type": t,
-                    "missing": missing
-                })
+        type_rows = [
+            {
+                "index": i,
+                "text": entries[i],
+                "type": t,
+            }
+            for i, (t, _) in enumerate(analysis)
+        ]
 
-        if issue_rows:
-            dialog = TypeResolutionDialog(self, issue_rows)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
-                return
-            overrides = dialog.get_type_map()
-        else:
-            overrides = {}
+        dialog = TypeResolutionDialog(self, type_rows)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        overrides = dialog.get_type_map()
 
         prompt_entries = []
         for i, line in enumerate(entries):
@@ -1369,7 +1395,7 @@ class BiblioMakerWindow(QMainWindow):
         self.statusLabel.setText(message)
 
     def processing_finished(self, result: dict):
-        """Завершение обработки"""
+        """Показать результат обработки и сохранить запись в историю."""
         self.progress_bar.setVisible(False)
         self.btn_process.setEnabled(True)
         self.btn_cancel.setEnabled(False)
@@ -1432,7 +1458,11 @@ class BiblioMakerWindow(QMainWindow):
             self.processing_thread.request_cancel()
 
     def save_document(self):
-        """Сохранение результата"""
+        """Сохранить исправленный список в .txt или .docx.
+
+        Для исходного Word-документа возможно создание резервной копии и
+        замена найденного раздела библиографии.
+        """
         fixed_text = self.fixed_text.toPlainText().strip()
         if not fixed_text:
             QMessageBox.warning(self, "Нет данных", "Нечего сохранять!")
@@ -1523,7 +1553,9 @@ class BiblioMakerWindow(QMainWindow):
         self.setFont(QFont("Segoe UI Variable", font_size))
         self._apply_styles()
 
-        provider = self.settings.get("default_provider", "mock")
+        provider = self.settings.get("default_provider", "yandex")
+        if provider == "mock":
+            provider = "yandex"
         provider_index = self.provider_combo.findText(provider)
         if provider_index >= 0:
             self.provider_combo.setCurrentIndex(provider_index)
@@ -1542,6 +1574,7 @@ class BiblioMakerWindow(QMainWindow):
         self.left_group.setTitle(self._t("original_list"))
         self.right_group.setTitle(self._t("fixed_list"))
         self.manual_input.setPlaceholderText(self._t("manual_placeholder"))
+        self.source_text.setPlaceholderText(self._t("file_placeholder"))
         self.history_table.setHorizontalHeaderLabels(self._t("history_headers"))
         self.btn_refresh_history.setText(self._t("refresh"))
         self.btn_clear_history.setText(self._t("clear_history"))
@@ -1574,7 +1607,7 @@ class BiblioMakerWindow(QMainWindow):
         clipboard.setText(item.text())
 
     def _apply_styles(self):
-        """Единый современный стиль интерфейса"""
+        """Применить общую тему приложения ко всем основным виджетам."""
         theme = self.settings.get("theme", "light")
         font_size = int(self.settings.get("font_size", "12"))
         if theme == "dark":

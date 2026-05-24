@@ -12,11 +12,17 @@ from typing import List, Dict, Tuple
 
 
 class DocxProcessor:
-    """Класс для обработки Word-документов"""
+    """Класс для чтения и изменения Word-документов.
+
+    Используется в файловом режиме: находит раздел списка литературы,
+    извлекает записи для обработки и затем заменяет этот раздел в новом
+    .docx-файле.
+    """
 
     # Ключевые слова для поиска списка литературы
     BIBLIO_KEYWORDS = [
         r'(?i)список\s+литературы',
+        r'(?i)список\s+использованных\s+источников',
         r'(?i)библиографический\s+список',
         r'(?i)использованные\s+источники',
         r'(?i)литература',
@@ -49,7 +55,7 @@ class DocxProcessor:
         start_idx = -1
         end_idx = -1
 
-        # Поиск начала раздела
+        # Начало списка определяется по типовым заголовкам.
         for i, para in enumerate(self.document.paragraphs):
             if any(re.search(pattern, para.text) for pattern in self.BIBLIO_KEYWORDS):
                 start_idx = i + 1
@@ -58,7 +64,8 @@ class DocxProcessor:
         if start_idx == -1:
             return (-1, -1)
 
-        # Поиск конца раздела (следующий заголовок или пустая строка)
+        # Конец списка определяется по пустому абзацу или концу документа.
+        # Если после пустой строки снова идет нумерованный источник, список продолжается.
         for i in range(start_idx, len(self.document.paragraphs)):
             para = self.document.paragraphs[i]
 
@@ -108,7 +115,8 @@ class DocxProcessor:
                     current_entry = ""
                 continue
 
-            # Если строка начинается с цифры или маркера - новая запись
+            # Нумерация или маркер означают начало новой записи.
+            # Остальные строки считаются продолжением предыдущего источника.
             if re.match(r'^\d+[\.\)]\s', text) or re.match(r'^[•\-]\s', text):
                 if current_entry:
                     entries.append(current_entry)
@@ -148,8 +156,7 @@ class DocxProcessor:
                 para.paragraph_format.line_spacing = Pt(14)
         else:
             anchor = self.document.paragraphs[start_idx - 1] if start_idx > 0 else None
-            # Удаляем старые записи
-            # Важно: удаляем с конца чтобы индексы не сдвигались
+            # Удаляем старые записи с конца, чтобы индексы параграфов не сдвигались.
             for i in range(end_idx - 1, start_idx - 1, -1):
                 if i < len(self.document.paragraphs):
                     p = self.document.paragraphs[i]._element

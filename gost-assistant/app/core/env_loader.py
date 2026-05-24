@@ -10,6 +10,12 @@ from dotenv import load_dotenv
 
 
 def _candidate_env_paths() -> list[Path]:
+    """Сформировать список мест, где может лежать .env.
+
+    При обычном запуске .env ищется в рабочем каталоге и корне проекта.
+    В PyInstaller-сборке дополнительно проверяются папка рядом с exe и
+    временная папка распаковки onefile-приложения.
+    """
     paths = []
 
     paths.append(Path.cwd() / ".env")
@@ -35,6 +41,7 @@ def _candidate_env_paths() -> list[Path]:
 
 
 def load_app_env() -> None:
+    """Загрузить первый найденный .env без перезаписи уже заданных переменных."""
     for path in _candidate_env_paths():
         if path.exists():
             load_dotenv(path, override=False)

@@ -17,6 +17,8 @@ FALLBACK_PREFIX = "plain64:"
 
 
 class DATA_BLOB(ctypes.Structure):
+    """Структура Windows DPAPI для передачи байтов в CryptProtectData."""
+
     _fields_ = [
         ("cbData", wintypes.DWORD),
         ("pbData", ctypes.POINTER(ctypes.c_char)),
@@ -79,6 +81,11 @@ def _dpapi_decrypt(value: str) -> str:
 
 
 def protect_secret(value: str) -> str:
+    """Защитить секрет перед записью в БД.
+
+    На Windows используется DPAPI текущего пользователя. Если значение уже
+    защищено, оно возвращается без повторного шифрования.
+    """
     value = value or ""
     if not value:
         return ""
@@ -90,6 +97,7 @@ def protect_secret(value: str) -> str:
 
 
 def unprotect_secret(value: str) -> str:
+    """Расшифровать секрет из БД для использования в API-запросе."""
     value = value or ""
     if not value:
         return ""
@@ -103,5 +111,6 @@ def unprotect_secret(value: str) -> str:
 
 
 def is_protected_secret(value: str) -> bool:
+    """Проверить, похоже ли значение на уже защищенный секрет."""
     value = value or ""
     return value.startswith(DPAPI_PREFIX) or value.startswith(FALLBACK_PREFIX)

@@ -13,7 +13,11 @@ from .secrets import protect_secret
 
 
 class GOSTDatabase:
-    """Класс для управления базой данных приложения"""
+    """Обертка над SQLite-базой приложения.
+
+    База хранит две группы данных: историю обработок и пользовательские
+    настройки. Секреты ИИ-агентов сохраняются уже в защищенном виде.
+    """
 
     def __init__(self, db_path: str = "data/gost_assistant.db"):
         """
@@ -76,8 +80,11 @@ class GOSTDatabase:
                        )
                        """)
 
+        # Старый кеш больше не используется, поэтому удаляется при инициализации.
         cursor.execute("DROP TABLE IF EXISTS cache")
 
+        # При первом запуске можно перенести Yandex-ключи из .env в БД.
+        # В БД они попадают не открытым текстом, а через protect_secret().
         load_app_env()
         env_yandex_api_key = protect_secret(os.getenv("YANDEX_API_KEY", ""))
         env_yandex_folder_id = protect_secret(os.getenv("YANDEX_FOLDER_ID", ""))
@@ -86,7 +93,7 @@ class GOSTDatabase:
         default_settings = [
             ('ui_language', 'ru_RU', 'Язык интерфейса приложения'),
             ('theme', 'light', 'Тема оформления (light/dark)'),
-            ('default_provider', 'mock', 'ИИ-агент по умолчанию'),
+            ('default_provider', 'yandex', 'ИИ-агент по умолчанию'),
             ('output_folder', '', 'Папка для сохранения результатов'),
             ('auto_backup', 'true', 'Автоматическое создание резервной копии'),
             ('check_updates', 'true', 'Автоматическая проверка обновлений'),

@@ -1,6 +1,6 @@
 """
 Модуль для работы с ИИ-агентами
-Реализует абстракцию для различных API (YandexGPT, Mock)
+Реализует абстракцию для различных API (YandexGPT, GigaChat)
 """
 
 import os
@@ -28,7 +28,11 @@ load_app_env()
 # ==================== АБСТРАКТНЫЙ БАЗОВЫЙ КЛАСС ====================
 
 class AIProvider(ABC):
-    """Абстрактный базовый класс для провайдеров ИИ"""
+    """Общий интерфейс для всех ИИ-агентов приложения.
+
+    GUI работает только с этим интерфейсом, поэтому конкретный агент
+    (YandexGPT или GigaChat) можно заменить без изменений в окне обработки.
+    """
 
     @abstractmethod
     def fix_text(self, text_lines: List[str], rules_context: str = "", ui_language: str = "ru_RU") -> Dict:
@@ -53,7 +57,11 @@ class AIProvider(ABC):
 # ==================== YANDEXGPT PROVIDER ====================
 
 class YandexGPTProvider(AIProvider):
-    """Провайдер: YandexGPT (использует API-ключ напрямую)"""
+    """ИИ-агент YandexGPT.
+
+    Отвечает за формирование промпта, отправку запроса в API Yandex Cloud
+    и приведение ответа модели к формату, который можно показать в GUI.
+    """
 
     def __init__(self, api_key: str = None, folder_id: str = None):
         # Берём из настроек приложения, затем из .env если не переданы
@@ -94,7 +102,7 @@ class YandexGPTProvider(AIProvider):
                 "messages": [
                     {
                         "role": "system",
-                        "text": "Ты — эксперт по оформлению академических работ по ГОСТ Р 7.0.100-2018 для РФ."
+                        "text": "Ты — помощник по приведению библиографических записей к правилам оформления, заданным пользователем. Следуй только правилам из пользовательского запроса. Не используй внешние знания о ГОСТ, если они противоречат указанным правилам."
                     },
                     {
                         "role": "user",
@@ -103,7 +111,8 @@ class YandexGPTProvider(AIProvider):
                 ]
             }
 
-            # Запрос к YandexGPT
+            # Запрос синхронный, но выполняется в ProcessingThread,
+            # поэтому интерфейс приложения не блокируется.
             response = requests.post(
                 self.gpt_url,
                 headers=headers,
@@ -142,7 +151,12 @@ class YandexGPTProvider(AIProvider):
             }
 
     def _build_prompt(self, text_lines: List[str], ui_language: str = "ru_RU") -> str:
-        """Формирование промпта для модели"""
+        """Формирование промпта с правилами ГОСТ и типами источников.
+
+        Каждая запись получает служебный префикс TYPE=..., который помогает
+        модели выбрать шаблон оформления. В итоговый ответ этот префикс
+        попадать не должен.
+        """
         lines_with_types = []
         for line in text_lines:
             stripped = line.strip()
@@ -247,7 +261,12 @@ class YandexGPTProvider(AIProvider):
 """
 
     def _parse_response(self, text: str, fallback_entries: List[str] = None) -> List[str]:
-        """Парсинг ответа модели в пользовательский нумерованный результат."""
+        """Парсинг ответа модели в пользовательский нумерованный результат.
+
+        Модели не всегда строго соблюдают формат, поэтому здесь дополнительно:
+        отделяются исправленные записи от блока недостающих данных, удаляются
+        служебные TYPE-префиксы и скрывается пустой блок "НЕ ХВАТАЕТ ДАННЫХ".
+        """
         fixed_header = "ИСПРАВЛЕННЫЙ СПИСОК:"
         missing_header = "НЕ ХВАТАЕТ ДАННЫХ:"
         fixed_lines = []
@@ -361,6 +380,7 @@ class YandexGPTProvider(AIProvider):
 
     @staticmethod
     def _filter_empty_missing_lines(lines: List[str]) -> List[str]:
+        """Удаление строк, которые означают отсутствие недостающих данных."""
         empty_markers = {
             "",
             "-",
@@ -426,7 +446,12 @@ class YandexGPTProvider(AIProvider):
 # ==================== GIGACHAT PROVIDER ====================
 
 class GigaChatProvider(YandexGPTProvider):
-    """Провайдер: GigaChat API."""
+    """ИИ-агент GigaChat.
+
+    Наследует правила промпта и постобработку от YandexGPTProvider, но
+    использует другой протокол авторизации: сначала получает OAuth-токен,
+    затем отправляет chat completion запрос в GigaChat API.
+    """
 
     SCOPE = "GIGACHAT_API_PERS"
     ROOT_CA_URL = "https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt"
@@ -454,7 +479,7 @@ class GigaChatProvider(YandexGPTProvider):
                 "messages": [
                     {
                         "role": "system",
-                        "content": "Ты — эксперт по оформлению академических работ по ГОСТ Р 7.0.100-2018 для РФ."
+                        "content": "Ты — помощник по приведению библиографических записей к правилам оформления, заданным пользователем. Следуй только правилам из пользовательского запроса. Не используй внешние знания о ГОСТ, если они противоречат указанным правилам."
                     },
                     {
                         "role": "user",
@@ -505,6 +530,7 @@ class GigaChatProvider(YandexGPTProvider):
             }
 
     def _get_access_token(self) -> str:
+        """Получение OAuth-токена GigaChat по Authorization Key."""
         if self._access_token:
             return self._access_token
 
@@ -529,6 +555,12 @@ class GigaChatProvider(YandexGPTProvider):
 
     @staticmethod
     def _normalize_authorization_key(value: str) -> str:
+        """Приведение пользовательского ввода к формату Basic credentials.
+
+        Пользователь обычно вставляет готовый Authorization Key из кабинета.
+        Для удобства также поддерживается строка "Basic ..." и пара
+        "client_id:client_secret", которая кодируется в base64 автоматически.
+        """
         value = (value or "").strip()
         if value.lower().startswith("basic "):
             value = value[6:].strip()
@@ -537,6 +569,12 @@ class GigaChatProvider(YandexGPTProvider):
         return value
 
     def _get_verify_bundle(self) -> str:
+        """Подготовка CA-bundle для проверки SSL-сертификатов GigaChat.
+
+        API GigaChat использует цепочку с российским корневым сертификатом,
+        которого нет в стандартном certifi. Поэтому приложение один раз
+        скачивает корневой сертификат Минцифры и добавляет его к certifi.
+        """
         cert_dir = Path.cwd() / "data" / "certs"
         cert_dir.mkdir(parents=True, exist_ok=True)
         bundle_path = cert_dir / "gigachat_ca_bundle.pem"
@@ -563,38 +601,10 @@ class GigaChatProvider(YandexGPTProvider):
         return "GigaChat"
 
 
-# ==================== MOCK PROVIDER ====================
-
-class MockProvider(AIProvider):
-    """Тестовый провайдер (без реального API)"""
-
-    def fix_text(self, text_lines: List[str], rules_context: str = "", ui_language: str = "ru_RU") -> Dict:
-        """Имитация исправления для тестирования"""
-
-        fixed_lines = []
-        for line in text_lines:
-            fixed = re.sub(r'^TYPE=[^:\s]+(?:\s*[:\-—–]\s*|\s+)', '', line).strip()
-            # Простые замены для демонстрации
-            if ', ' in fixed and any(c.isdigit() for c in fixed):
-                fixed = fixed.replace(', ', '. — ', 1)
-            fixed_lines.append(fixed)
-
-        return {
-            'success': True,
-            'fixed_lines': fixed_lines,
-            'raw_response': '\n'.join(fixed_lines),
-            'provider': self.get_name(),
-            'timestamp': datetime.now().isoformat()
-        }
-
-    def get_name(self) -> str:
-        return "Mock (Тестовый)"
-
-
 # ==================== FACTORY ====================
 
 class AIProviderFactory:
-    """Фабрика для создания провайдеров"""
+    """Фабрика для создания ИИ-агентов по строковому идентификатору."""
 
     @staticmethod
     def create_provider(provider_name: str, settings: Dict[str, str] = None) -> AIProvider:
@@ -602,7 +612,7 @@ class AIProviderFactory:
         Создание провайдера по имени
 
         Args:
-            provider_name: Название провайдера ('yandex' или 'mock')
+            provider_name: Название ИИ-агента ('yandex' или 'gigachat')
 
         Returns:
             Экземпляр провайдера
@@ -617,5 +627,4 @@ class AIProviderFactory:
             return GigaChatProvider(
                 client_id=unprotect_secret(settings.get("gigachat_client_id", "").strip())
             )
-        else:
-            return MockProvider()
+        raise ValueError(f"Неизвестный ИИ-агент: {provider_name}")

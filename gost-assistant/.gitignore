@@ -23,3 +23,5 @@ key.json
 data/*.db
 data/certs/
 *.log
+/dist/
+/build/
